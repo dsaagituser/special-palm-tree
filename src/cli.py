@@ -78,15 +78,28 @@ def cmd_apply(args):
         # Parse assets from command line or file
         assets = {}
         
+        if args.assets_file and args.assets:
+            print("Warning: Both --assets and --assets-file provided, using --assets-file")
+        
         if args.assets_file:
             with open(args.assets_file, 'r') as f:
                 assets_data = json.load(f)
                 assets = {int(k): v for k, v in assets_data.items()}
-        else:
+        elif args.assets:
             # Parse from command line: segment_id:path format
             for asset_spec in args.assets:
+                if ':' not in asset_spec:
+                    print(f"Error: Invalid asset specification '{asset_spec}'. Expected format: segment_id:path", file=sys.stderr)
+                    return 1
                 seg_id, path = asset_spec.split(':', 1)
-                assets[int(seg_id)] = path
+                try:
+                    assets[int(seg_id)] = path
+                except ValueError:
+                    print(f"Error: Invalid segment ID in '{asset_spec}'. Segment ID must be an integer.", file=sys.stderr)
+                    return 1
+        else:
+            print("Error: Must provide either --assets or --assets-file", file=sys.stderr)
+            return 1
         
         success = apply_template(args.template, assets, args.output)
         return 0 if success else 1
@@ -171,12 +184,15 @@ Examples:
         required=True,
         help='Output video file path'
     )
-    apply_parser.add_argument(
+    
+    # Create mutually exclusive group for assets
+    assets_group = apply_parser.add_mutually_exclusive_group()
+    assets_group.add_argument(
         '-a', '--assets',
         nargs='+',
         help='Assets in format segment_id:path (e.g., 0:image.jpg 1:video.mp4)'
     )
-    apply_parser.add_argument(
+    assets_group.add_argument(
         '-f', '--assets-file',
         help='JSON file containing assets mapping'
     )

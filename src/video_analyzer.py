@@ -73,7 +73,7 @@ class VideoAnalyzer:
         Initialize VideoAnalyzer
         
         Args:
-            motion_threshold: Threshold for detecting motion between frames
+            motion_threshold: Threshold for detecting motion between frames (mean pixel difference)
         """
         self.motion_threshold = motion_threshold
     
@@ -95,10 +95,14 @@ class VideoAnalyzer:
         
         # Get video properties
         fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            cap.release()
+            raise ValueError(f"Invalid FPS ({fps}) in video file: {video_path}")
+        
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_duration = frame_count / fps if fps > 0 else 0
+        total_duration = frame_count / fps
         
         # Detect segments based on motion analysis
         segments = self._detect_segments(cap, fps, sample_rate)
@@ -215,7 +219,11 @@ class VideoAnalyzer:
                     
                     if next_type != segment_type:
                         break
-                i += 1
+                    i += 1
+                else:
+                    # Reached end of motion scores
+                    i = len(motion_scores)
+                    break
             
             # Calculate segment timing
             start_frame = segment_start * sample_rate
@@ -278,26 +286,35 @@ class VideoCompositor:
         if not out.isOpened():
             raise ValueError(f"Cannot create output video: {output_path}")
         
-        # Process each segment
-        for segment in self.template.segments:
-            asset_path = assets.get(segment.segment_id)
-            if not asset_path:
-                print(f"Warning: No asset provided for segment {segment.segment_id}")
-                continue
-            
-            self._add_segment_to_video(out, asset_path, segment)
+        try:
+            # Process each segment
+            for segment in self.template.segments:
+                asset_path = assets.get(segment.segment_id)
+                if not asset_path:
+                    print(f"Warning: No asset provided for segment {segment.segment_id}")
+                    continue
+                
+                self._add_segment_to_video(out, asset_path, segment)
+        finally:
+            out.release()
         
-        out.release()
         return True
     
     def _validate_assets(self, assets: Dict[int, str]) -> bool:
-        """Validate that required assets are provided"""
+        """Validate that required assets are provided and accessible"""
+        from pathlib import Path
+        
         required_segments = {seg.segment_id for seg in self.template.segments}
         provided_segments = set(assets.keys())
         
         missing = required_segments - provided_segments
         if missing:
             print(f"Warning: Missing assets for segments: {missing}")
+        
+        # Check that provided asset files exist
+        for seg_id, asset_path in assets.items():
+            if not Path(asset_path).exists():
+                print(f"Warning: Asset file does not exist: {asset_path} (segment {seg_id})")
         
         return True
     
@@ -335,35 +352,36 @@ class VideoCompositor:
                 print(f"Warning: Cannot open video: {asset_path}")
                 return
             
-            target_frames = int(segment.duration * self.template.fps)
-            source_fps = cap.get(cv2.CAP_PROP_FPS)
-            source_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            # Calculate frame sampling to match duration
-            if source_fps > 0:
-                frame_step = source_frame_count / target_frames if target_frames > 0 else 1
-            else:
-                frame_step = 1
-            
-            frame_idx = 0
-            written_frames = 0
-            
-            while written_frames < target_frames:
-                target_frame_idx = int(frame_idx * frame_step)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_idx)
+            try:
+                target_frames = int(segment.duration * self.template.fps)
+                source_fps = cap.get(cv2.CAP_PROP_FPS)
+                source_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 
-                ret, frame = cap.read()
-                if not ret:
-                    break
+                # Calculate frame sampling to match duration
+                if source_fps > 0 and source_frame_count > 0:
+                    frame_step = source_frame_count / target_frames if target_frames > 0 else 1
+                else:
+                    frame_step = 1
                 
-                # Resize to match template dimensions
-                frame = cv2.resize(frame, (self.template.width, self.template.height))
-                out.write(frame)
+                frame_idx = 0
+                written_frames = 0
                 
-                frame_idx += 1
-                written_frames += 1
-            
-            cap.release()
+                while written_frames < target_frames:
+                    target_frame_idx = int(frame_idx * frame_step)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_idx)
+                    
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    
+                    # Resize to match template dimensions
+                    frame = cv2.resize(frame, (self.template.width, self.template.height))
+                    out.write(frame)
+                    
+                    frame_idx += 1
+                    written_frames += 1
+            finally:
+                cap.release()
 
 
 def analyze_and_generate_template(video_path: str, output_template_path: str, 
